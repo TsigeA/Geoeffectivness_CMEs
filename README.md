@@ -1,6 +1,6 @@
 # Dayside Bz Prediction at 6 RE Using Gradient Boosting
 
-Predicts the dayside magnetospheric Bz field at 6 Earth radii (RE) from solar wind observations (OMNI), using SWMF MHD simulation output as the training target. Separate models are trained for the current timestep (t0), 1-hour (t+60 min), and 2-hour (t+120 min) forecast horizons.
+Predicts the dayside magnetospheric Bz field at 6 Earth radii (RE) from solar wind observations at L1 (OMNI data base), using SWMF MHD simulation output as the training target. Separate models are trained for the current timestep (t0), 1-hour (t+60 min), and 2-hour (t+120 min) forecast horizons.
 
 **Author:** TsigeA  
 **Dataset:** 23 geomagnetic storm events, 2015–2019
