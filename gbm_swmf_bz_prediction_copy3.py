@@ -8,10 +8,14 @@ models for each target time and evaluates their performance using RMSE, MAE, and
 metrics. The script also identifies the most important features for each target and
 saves the predictions and a summary of results to files.
 update:
- @May 2026: cross validation by spliting the training futures into 3
-  1. only using past Bz lags as features. 
-  2. using all available features (including non-lagged ones) (done)
-  3. using features with high importance gain from the previous runs (not including past Bz_6RE) i.e., Bz_use, Ey, Es, SYM-H & pdyn & theta  
+ @June 7 2026: cross validation by spliting the training futures (multiple case runs)
+  Case1: only using past Bz lags as features. 
+  Case2: only using IMF Bz (Bz_used_lag_0m, Bz_used_lag_15m, etc.) as features
+  Case3: using all features except zero-lag columns (columns ending with _lag_0m)
+  Case4: using all available features (including non-lagged ones)
+  Case5: using all features except SYM-H (to test if SYM-H is dominating the predictions)
+@June 8 2026: added per-storm metrics calculation for all validation/test storms. Metrics in the results summary are calculated across all storms in the split.
+- The per-storm metrics allow us to see if there are particular storms where the model performs especially well or poorly.
 @author: TsigeA
 @date: Apr 10, 2026
 '''
@@ -54,6 +58,33 @@ TARGETS = {
 TARGETS_TO_RUN = ["tplus_60m", "tplus_120m"] # specify which targets to train on, must be keys in TARGETS
 
 # ============================================================
+# CASE RUN SETTINGS
+# ============================================================
+# Case 1: only past Bz_6RE lag columns (e.g. Bz_6RE_lag_5m, Bz_6RE_lag_10m, …)
+# Case 2: only IMF Bz column(s) — any column whose name contains IMF_BZ_PATTERN
+# Case 3: all features with 30-minute lags
+# Case 4: all features except Bz_6RE columns (columns ending in BZ_6RE_PATTERN)
+# Case 5: all features except SYM-H and Bz_6RE columns
+# Case 6: only IMF Bz and SWMF Bz columns
+# Case 7: all available features
+CASES_TO_RUN = ["case1", "case2", "case3","case4", "case5","case6", "case7"] # specify which cases to run, must be keys in  CASE_LABELS
+
+CASE_LABELS = {
+    "case1": "past_bz_lags_only",
+    "case2": "imf_bz_only",
+    "case3": "all_0min_lags_only",
+    "case4": "all_features_no_bz_6re",
+    "case5": "all_no_symh_no_bz_6re",
+    "case6": "only_IMFBz_SWMFBz",
+    "case7": "all_features"
+}
+
+BZ_LAG_PATTERN  = "Bz_6RE_lag_"   # substring that identifies past SWMF Bz lag columns i.e., Bz_6RE_lag_0m, Bz_6RE_lag_15m, etc.
+IMF_BZ_PATTERN  = "BZ_used_"       # substring that identifies IMF Bz column(s) i.e., Bz_used_lag_0m, Bz_used_lag_15m, etc.
+ZERO_LAG_SUFFIX = "_lag_0m"        # suffix that marks the zero-lag (current-value) columns
+BZ_6RE_PATTERN = "Bz_6RE_"          # substring that identifies Bz_6RE columns
+ALL_30MIN_LAGS= "_lag_30m"         # suffix that marks the 30-minute lag columns
+# ============================================================
 # LAG FEATURE SETTINGS
 # ============================================================
 # The t0 target column represents the current Bz at 6RE — a valid input feature
@@ -83,7 +114,7 @@ VAL_FRAC = 0.10
 TEST_FRAC = 0.10
 
 RANDOM_SEED = 42
-SHUFFLE_STORMS = True
+SHUFFLE_STORMS = True # Set to True to shuffle the order of storms before splitting into train/val/test sets.
 
 RUN_MANUAL_GRID_SEARCH = False # Set to True to perform manual grid search over PARAM_GRID, which will increase runtime significantly. If False, uses BASE_PARAMS directly.
 USE_OPTUNA = True # Set to True to perform Bayesian hyperparameter optimization with Optuna, which will increase runtime significantly. If False, uses manual grid search if RUN_MANUAL_GRID_SEARCH is True, otherwise uses BASE_PARAMS directly.
@@ -92,7 +123,7 @@ USE_OPTUNA = True # Set to True to perform Bayesian hyperparameter optimization 
 # base parameters for XGBoost
 BASE_PARAMS = {
     "objective": "reg:squarederror", # regression with squared error loss
-    "n_estimators": 10000, # maximum number of trees
+    "n_estimators": 1000, # maximum number of trees
     "learning_rate": 0.01, # step size shrinkage
     "max_depth": 3, # maximum depth of each tree
     "min_child_weight": 2, 
@@ -101,7 +132,7 @@ BASE_PARAMS = {
     "reg_alpha": 0.0, # L1 regularization term on weights
     "reg_lambda": 1.0,
     "random_state": RANDOM_SEED,
-    "tree_method": "hist",
+    "tree_method": "hist",# use histogram-based algorithm for faster training on larger datasets
     "early_stopping_rounds": 30, # stop if no improvement after 30 rounds
 }
 
@@ -179,6 +210,7 @@ def get_feature_columns(df: pd.DataFrame, target_cols: List[str]) -> List[str]:
         DATETIME_COL,
         "storm_id",
         "source_file",
+        # "Bz_6RE_lag_0m",
         *target_cols,
     }
     feature_cols = [c for c in df.columns if c not in excluded]
@@ -187,6 +219,49 @@ def get_feature_columns(df: pd.DataFrame, target_cols: List[str]) -> List[str]:
         raise ValueError("No feature columns found after excluding metadata and targets.")
 
     return feature_cols
+
+
+def get_case_feature_columns(
+    df: pd.DataFrame,
+    target_cols: List[str],
+    case: str,
+) -> List[str]:
+    """Return feature columns for a given case run.
+    case1 — only past Bz_6RE lag columns (columns containing BZ_LAG_PATTERN).
+    case2 — only IMF Bz columns (columns containing IMF_BZ_PATTERN).
+    case3 — all 0-minute lag columns (columns ending with 0min_lag_).
+    case4 — all features except Bz_6RE columns (columns containing BZ_6RE_PATTERN).
+    case5 - all features except SYM-H and Bz_6RE columns
+    case6 - only IMF Bz and SWMF Bz columns
+    case7 - all available features
+    """
+    all_features = get_feature_columns(df, target_cols)
+
+    if case == "case1":
+        cols = [c for c in all_features if BZ_LAG_PATTERN in c]
+    elif case == "case2":
+        cols = [c for c in all_features if c.startswith(IMF_BZ_PATTERN)]
+    elif case == "case3":
+        cols = [c for c in all_features if c.endswith(ZERO_LAG_SUFFIX)]
+    elif case == "case4":
+        cols = [c for c in all_features if not c.startswith(BZ_6RE_PATTERN)]
+    elif case == "case5":
+        cols = [c for c in all_features if not c.startswith("SYMH_lag_") and not c.startswith(BZ_6RE_PATTERN)]
+    elif case == "case6":
+        cols = [c for c in all_features if c.startswith(IMF_BZ_PATTERN) or c.startswith(BZ_LAG_PATTERN)]
+    elif case == "case7":
+        cols = all_features
+    else:
+        raise ValueError(f"Unknown case: {case!r}. Must be one of 'case1', 'case2', 'case3', 'case4', 'case5', 'case6', 'case7'.")
+
+    if not cols:
+        raise ValueError(
+            f"No feature columns matched for {case!r}. "
+            f"Check BZ_LAG_PATTERN / IMF_BZ_PATTERN / ZERO_LAG_SUFFIX against your column names.\n"
+            f"Available columns: {all_features}"
+        )
+
+    return cols
 
 
 # def add_lag_features(
@@ -403,7 +478,8 @@ def bayesian_search(
         return rmse(y_val.values, model.predict(X_val))
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction="minimize")
+    sampler = optuna.samplers.TPESampler(seed=base_params.get("random_state", 42))
+    study = optuna.create_study(direction="minimize", sampler=sampler)
     study.optimize(objective, n_trials=n_trials)
     best_params = {**base_params, **study.best_params}
     return best_params, study.best_value
@@ -521,46 +597,20 @@ def fit_and_evaluate_for_target(
 # MAIN
 # ============================================================
 
-def main() -> None:
-    df = load_all_storms(DATA_DIR, FILE_GLOB)
-
-    # # --- Lag features (paper §2: past target values as inputs) ---
-    # # If ADD_LAG_FEATURES_AT_TRAINING is True, create lag columns here at training
-    # # time (useful if CSVs were generated without pre-baked lags). If False (default),
-    # # Bz_6RE_lag_* columns are already in the CSVs from the data generation script
-    # # and are picked up automatically by get_feature_columns() below.
-    # if ADD_LAG_FEATURES_AT_TRAINING:
-    #     bz_lag_steps = BZ_LAG_MINUTES // DATA_RESOLUTION_MINUTES
-    #     if BZ_CURRENT_COL in df.columns:
-    #         df[BZ_LAG_ALIAS] = df[BZ_CURRENT_COL]
-    #         lag_specs: Dict[str, int] = {BZ_LAG_ALIAS: bz_lag_steps}
-    #     else:
-    #         print(f"[lag] Warning: '{BZ_CURRENT_COL}' not found — no past-Bz lag features added.")
-    #         lag_specs = {}
-    #     for col, mins in EXTRA_LAG_FEATURES.items():
-    #         lag_specs[col] = mins // DATA_RESOLUTION_MINUTES
-    #     if lag_specs:
-    #         df = add_lag_features(df, lag_specs)
-
-    available_targets = [TARGETS[k] for k in TARGETS if TARGETS[k] in df.columns]
-    feature_cols = get_feature_columns(df, available_targets)
-
-    storm_ids = sorted(df["storm_id"].unique().tolist())
-    train_ids, val_ids, test_ids = split_storm_ids(storm_ids)
-    # results folder
-    output_dir = Path(f"model_results_{current_time}")
-    output_dir.mkdir(exist_ok=True)
-    print("=" * 80)
-    print("Combined data shape:", df.shape)
-    print("Number of storm files:", len(storm_ids))
-    print("Storm IDs:", storm_ids)
-    print("\nStorm-wise split:")
-    print("  Train:", train_ids)
-    print("  Val  :", val_ids)
-    print("  Test :", test_ids)
-    print("\nNumber of features:", len(feature_cols))
-    print("Targets found:", available_targets)
-    print("=" * 80)
+def _run_case(
+    df: pd.DataFrame,
+    feature_cols: List[str],
+    train_ids: List[str],
+    val_ids: List[str],
+    test_ids: List[str],
+    case_label: str,
+    case_output_dir: Path,
+) -> None:
+    """Train and evaluate all requested targets for one feature-set case."""
+    print(f"\n{'#'*80}")
+    print(f"# CASE: {case_label}  ({len(feature_cols)} features)")
+    print(f"# Features: {feature_cols[:8]}{'…' if len(feature_cols) > 8 else ''}")
+    print(f"{'#'*80}")
 
     all_results = {}
 
@@ -593,73 +643,61 @@ def main() -> None:
         for k, v in results["test_metrics"].items():
             print(f"  {k}: {v:.4f}")
 
-        print("\nTop 20 features by gain:")
-        for feat, score in results["top_20_features_by_gain"]:
-            print(f"  {feat:35s} {score:.6f}")
+        # print("\nTop 20 features by gain:")
+        # for feat, score in results["top_20_features_by_gain"]:
+        #     print(f"  {feat:35s} {score:.6f}")
 
-        print("\nGrouped feature importance:")
-        print(results["grouped_feature_importance"].head(15).to_string(index=False))
+        # print("\nGrouped feature importance:")
+        # print(results["grouped_feature_importance"].head(15).to_string(index=False))
 
-        val_out = Path(f"{output_dir}/validation_predictions_{target_key}_{current_time}.csv")
-        test_out = Path(f"{output_dir}/test_predictions_{target_key}_{current_time}.csv")
+        val_out = case_output_dir / f"validation_predictions_{target_key}_{current_time}.csv"
+        test_out = case_output_dir / f"test_predictions_{target_key}_{current_time}.csv"
         results["val_predictions"].to_csv(val_out, index=False)
         results["test_predictions"].to_csv(test_out, index=False)
 
         print(f"\nSaved validation predictions to: {val_out}")
         print(f"Saved test predictions to: {test_out}")
-        # save model to file
-        joblib.dump(results["model"], output_dir / f"model_{target_key}_{current_time}.pkl")
-        print(f"Saved trained model to: {output_dir / f'model_{target_key}_{current_time}.pkl'}")
 
-    summary = {}
-    for target_col, res in all_results.items():
-        summary[target_col] = {
-            "train_storm_ids": res["train_storm_ids"],
-            "val_storm_ids": res["val_storm_ids"],
-            "test_storm_ids": res["test_storm_ids"],
-            "n_train_rows": res["n_train_rows"],
-            "n_val_rows": res["n_val_rows"],
-            "n_test_rows": res["n_test_rows"],
-            "best_params": res["best_params"],
-            "val_metrics": res["val_metrics"],
-            "test_metrics": res["test_metrics"],
-            "top_20_features_by_gain": res["top_20_features_by_gain"],
-        }
-    #plot bar charts of feature importance for each target and save to file
+        joblib.dump(results["model"], case_output_dir / f"model_{target_key}_{current_time}.pkl")
+        print(f"Saved trained model to: {case_output_dir / f'model_{target_key}_{current_time}.pkl'}")
+
+    if not all_results:
+        print(f"No results for case {case_label}.")
+        return
+
+    # --- feature importance plots ---
     plt.figure(figsize=(12, 6))
     for target_col, res in all_results.items():
         top_feats = res["top_20_features_by_gain"]
         feats, scores = zip(*top_feats)
         plt.barh(feats, scores, alpha=0.6, label=target_col)
     plt.xlabel("Gain Importance Score", fontsize=14)
-    plt.title("Top 20 Features by Gain Importance for Each Target", fontsize=16)
+    plt.title(f"[{case_label}] Top 20 Features by Gain Importance", fontsize=16)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f"{output_dir}/feature_importance_comparison_{current_time}.png")
-    print(f"\nSaved feature importance comparison plot to: {output_dir}/feature_importance_comparison_{current_time}.png")
-    # plot grouped feature importance for each target and save to file
+    plt.savefig(case_output_dir / f"feature_importance_comparison_{current_time}.png")
+    plt.close()
+
     plt.figure(figsize=(12, 6))
     for target_col, res in all_results.items():
         grouped = res["grouped_feature_importance"]
         plt.bar(grouped["family"], grouped["score"], alpha=0.6, label=target_col)
     plt.xlabel("Feature Family", fontsize=14)
     plt.ylabel("Total Gain Importance Score", fontsize=14)
-    plt.title("Grouped Feature Importance by Family for Each Target", fontsize=16)
+    plt.title(f"[{case_label}] Grouped Feature Importance by Family", fontsize=16)
     plt.xticks(rotation=45, ha="right")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f"{output_dir}/grouped_feature_importance_comparison_{current_time}.png")
-    print(f"\nSaved grouped feature importance comparison plot to: {output_dir}/grouped_feature_importance_comparison_{current_time}.png")
-    # plot predictions vs actual values for each target and save to file
-    
+    plt.savefig(case_output_dir / f"grouped_feature_importance_comparison_{current_time}.png")
+    plt.close()
+
+    # --- per-storm prediction plots ---
     for target_col, res in all_results.items():
-        test_pred_df = res["test_predictions"] # use validation or test predictions as needed
+        test_pred_df = res["test_predictions"].copy()
         test_pred_df[DATETIME_COL] = pd.to_datetime(test_pred_df[DATETIME_COL])
-        # plot one storm event at a time 
-        unique_storm_ids = test_pred_df["storm_id"].unique()
-        for storm_id in unique_storm_ids:
+        for storm_id in test_pred_df["storm_id"].unique():
             storm_df = test_pred_df[test_pred_df["storm_id"] == storm_id]
-    
+            storm_metrics = evaluate_regression(storm_df["y_true"].values, storm_df["y_pred"].values) # compute metrics for this storm's test predictions
             fig, ax = plt.subplots(1, 1, figsize=(12, 6))
             ax2 = ax.twinx()
             ax.plot(storm_df[DATETIME_COL], storm_df["y_true"], label="True", color="black")
@@ -670,20 +708,84 @@ def main() -> None:
             ax2.set_ylabel("Residuals", fontsize=14, color="red")
             ax2.tick_params(axis="y", labelcolor="red")
             ax2.set_ylim(-100, 100)
-            fig.suptitle(f"{storm_df[DATETIME_COL].iloc[0]} Test Results for {target_col}", fontsize=16)
-            fig.text(0.01, 0.95, f"Test RMSE: {res['test_metrics']['rmse']:.2f}\nTest MAE:{res['test_metrics']['mae']:.2f}\nTest R²: {res['test_metrics']['r2']:.2f}", transform=fig.gca().transAxes, fontsize=12, verticalalignment="top",bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
-            # fig.text(0.01, 0.95, f"Validation RMSE: {res['val_metrics']['rmse']:.2f}\nValidation MAE:{res['val_metrics']['mae']:.2f}\nValidation R²: {res['val_metrics']['r2']:.2f}", transform=fig.gca().transAxes, fontsize=12, verticalalignment="top",bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
+            fig.suptitle(f"[{case_label}] {storm_df[DATETIME_COL].iloc[0]} — {target_col}", fontsize=14)
+            fig.text(
+                0.01, 0.95,
+                f"RMSE: {storm_metrics['rmse']:.2f}\n"
+                f"MAE: {storm_metrics['mae']:.2f}\n"
+                f"R²: {storm_metrics['r2']:.2f}",
+                transform=fig.gca().transAxes, fontsize=12,
+                verticalalignment="top",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+            )
             ax.legend()
             ax2.grid(alpha=0.3, which="both")
             plt.tight_layout()
-            plt.savefig(f"{output_dir}/{storm_df[DATETIME_COL].iloc[0]}_testresults_{target_col}_{current_time}.png")
-            print(f"\nSaved predictions vs actual plot for {target_col} to: {output_dir}/{storm_df[DATETIME_COL].iloc[0]}_testresults_{target_col}_{current_time}.png")
+            plot_path = case_output_dir / f"{storm_df[DATETIME_COL].iloc[0]}_testresults_{target_col}_{current_time}.png"
+            plt.savefig(plot_path)
+            plt.close()
+            print(f"\nSaved predictions plot to: {plot_path}")
 
-    # save summary to json file
-    with open(f"{output_dir}/gbm_multi_storm_summary{current_time}.json", "w") as f:
+    # --- summary JSON ---
+    summary = {}
+    for target_col, res in all_results.items():
+        summary[target_col] = {
+            "case": case_label,
+            "train_storm_ids": res["train_storm_ids"],
+            "val_storm_ids": res["val_storm_ids"],
+            "test_storm_ids": res["test_storm_ids"],
+            "n_train_rows": res["n_train_rows"],
+            "n_val_rows": res["n_val_rows"],
+            "n_test_rows": res["n_test_rows"],
+            "best_params": res["best_params"],
+            "val_metrics": res["val_metrics"],
+            "test_metrics": res["test_metrics"],
+            "top_20_features_by_gain": res["top_20_features_by_gain"],
+            "feature_columns": feature_cols,
+        }
+    summary_path = case_output_dir / f"gbm_summary_{case_label}_{current_time}.json"
+    with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
+    print(f"\nSaved summary to: {summary_path}")
 
-    print("\nSaved summary to gbm_multi_storm_summary.json")
+
+def main() -> None:
+    df = load_all_storms(DATA_DIR, FILE_GLOB)
+    available_targets = [TARGETS[k] for k in TARGETS if TARGETS[k] in df.columns]
+
+    storm_ids = sorted(df["storm_id"].unique().tolist())
+    train_ids, val_ids, test_ids = split_storm_ids(storm_ids)
+
+    output_dir = Path(f"model_results_{current_time}")
+    output_dir.mkdir(exist_ok=True)
+
+    print("=" * 80)
+    print("Combined data shape:", df.shape)
+    print("Number of storm files:", len(storm_ids))
+    print("Storm IDs:", storm_ids)
+    print("\nStorm-wise split:")
+    print("  Train:", train_ids)
+    print("  Val  :", val_ids)
+    print("  Test :", test_ids)
+    print("Targets found:", available_targets)
+    print("Cases to run:", CASES_TO_RUN)
+    print("=" * 80)
+
+    for case in CASES_TO_RUN:
+        case_label = CASE_LABELS[case]
+        case_feature_cols = get_case_feature_columns(df, available_targets, case)
+        case_output_dir = output_dir / case_label
+        case_output_dir.mkdir(exist_ok=True)
+
+        _run_case(
+            df=df,
+            feature_cols=case_feature_cols,
+            train_ids=train_ids,
+            val_ids=val_ids,
+            test_ids=test_ids,
+            case_label=case_label,
+            case_output_dir=case_output_dir,
+        )
 
 
 if __name__ == "__main__":
