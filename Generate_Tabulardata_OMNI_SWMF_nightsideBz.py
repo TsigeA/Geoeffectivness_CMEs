@@ -1,20 +1,17 @@
 '''
-Aim: to prepare a training table for predicting dayside Bz at 6 RE using OMNI data as features and SWMF Bz as targets, focusing on the storm peak period.
+Aim: to prepare a training table for predicting nightside Bz at 6 RE using OMNI data as features and SWMF Bz as targets, focusing on the storm peak period.
 It performs the following steps:
 1. Reads and processes the OMNI data, including handling fill values and computing derived quantities like Ey and Es.
-2. Reads the SWMF Bz data and extracts the mean Bz at 6 RE on the dayside.
+2. Reads the SWMF Bz data and extracts the mean Bz at 6 RE on the nightside.
 3. Restricts the data to a specified time window and identifies the storm peak time based on the minimum SYM-H value.
 4. Builds a training table with lagged OMNI features and future Bz targets at specified forecast horizons, 
 ensuring that only rows with valid future targets up to the storm peak time are included.
 5. Saves the resulting training table to a CSV file.
 
 @author: TsigeA
-@date: Mar 29 2026
-update: Jul 13 2026
-    - remove the lagged features to use the data for AR model training, since the AR model will handle the lagged features internally.
-    - Jul 17 2026: corrected the dayside_BZ_6RE extraction by limiting the y axis between -(0.125+2*0.25) & (0.125+2*0.25)
+@date: Jul 21 2026
+update: 
     - Jul 21 2026: added function to exract nightside Bz at 6 RE to use for ARx model and updated the grid tolerance from 2*0.25 in y axix to 0.25 for both x and y axis 
-    - using different script to extract nightside Bz to avoide to many mof=dification of the code 
 
 '''
 import os
@@ -43,7 +40,7 @@ Recov_end=storminf['Recov_endtime']
 # Radius selection for target
 TARGET_RADIUS_RE = 6.0
 R_TOL = 0.5
-DAYSIDE_ONLY = True   # X > 0
+NIGHTSIDE_ONLY= True # X < 0
 
 # OMNI history length used as features
 HISTORY_HOURS = 0     # 2 similar spirit to the GBM paper. 0 is used here since we are not using lagged features for the AR model training.
@@ -167,17 +164,18 @@ def read_swmf_bz(filepath: Path) -> pd.DataFrame:
     df = df.drop(columns=["date", "time"]) # drop the original date and time columns since we have the datetime index now
     return df 
 
-def extract_dayside_bz_at_6re(swmf_df: pd.DataFrame,
+
+def extract_nightside_bz_at_6re(swmf_df: pd.DataFrame,
                               target_radius_re: float = 6.0,
                               tol: float = 0.25,
-                              dayside_only: bool = True) -> pd.DataFrame:
+                              nightside_only: bool =True) -> pd.DataFrame:
     df = swmf_df.copy()
     df["r_re"] = np.sqrt(df["X_RE"] ** 2 + df["Y_RE"] ** 2)
 
     mask = np.abs(df["r_re"] - target_radius_re) <= tol
 
-    if dayside_only:
-        mask &= df["X_RE"] > 0
+    if nightside_only:
+        mask &= df["X_RE"] < 0
         mask &= (df["Y_RE"] > -(0.125+tol))&(df["Y_RE"]<0.125+tol) # correction added
 
     subset = df[mask].copy()
@@ -200,13 +198,12 @@ def extract_dayside_bz_at_6re(swmf_df: pd.DataFrame,
     target = (
         subset.groupby("datetime")
         .agg(
-            target_Bz_dayside_6RE=("Bz", "mean"),
+            target_Bz_nightside_6RE=("Bz", "mean"),
             n_points_target=("Bz", "size")
         )
         .sort_index()
         )
     return target
-
 
 # ============================================================
 # EVENT WINDOW AND STORM PEAK
@@ -335,7 +332,7 @@ def build_training_table(omni_df: pd.DataFrame,
             if t_future not in target_indexed.index:
                 valid = False
                 break
-            target_vals[f"target_Bz_dayside_6RE_tplus_{h}m"] = target_indexed.loc[t_future, "target_Bz_dayside_6RE"]
+            target_vals[f"target_Bz_nightside_6RE_tplus_{h}m"] = target_indexed.loc[t_future, "target_Bz_nightside_6RE"]
 
         if not valid:
             continue
@@ -349,7 +346,7 @@ def build_training_table(omni_df: pd.DataFrame,
         if feat is None:
             continue
 
-        feat["target_Bz_dayside_6RE_t0"] = target_indexed.loc[t, "target_Bz_dayside_6RE"]
+        feat["target_Bz_nightside_6RE_t0"] = target_indexed.loc[t, "target_Bz_nightside_6RE"]
         feat["n_points_target"] = target_indexed.loc[t, "n_points_target"]
         feat["phase"] = target_indexed.loc[t, "phase"]
         # feat["doy"] = t.dayofyear # already have doy from the OMNI features
@@ -413,8 +410,8 @@ for i in range(len(OMNI_flist)):
     # SWMF_FILE = Path("z=0_var_2_e20151219-101300-000_20151221-041300-000Bz.txt")
     print (f"Processing OMNI file: {OMNI_FILE}")
     print (f"Processing SWMF file: {SWMF_FILE}")
-    OUTPUT_CSV = f"{OMNI_FILE[10:-17]}_dayside_6RE_peak_1h_2h_nolagg.csv"
-    # OUTPUT_CSV = f"{OMNI_FILE[10:-17]}_nightside_6RE_peak_1h_2h_nolagg.csv"
+    # OUTPUT_CSV = f"{OMNI_FILE[10:-17]}_dayside_6RE_peak_1h_2h_nolagg.csv"
+    OUTPUT_CSV = f"{OMNI_FILE[10:-17]}_nightside_6RE_peak_1h_2h_nolagg.csv"
     omni_df = read_omni_5min(OMNI_FILE)
     omni_df.head()
     swmf_df = read_swmf_bz(SWMF_FILE)
@@ -451,11 +448,11 @@ for i in range(len(OMNI_flist)):
     else:
         Quietphase=swmf_df.loc[prestorm_Stime:(SSC_Stime-pd.Timedelta('1ns'))]
         omni_Quietphase=omni_df.loc[prestorm_Stime:(SSC_Stime-pd.Timedelta('1ns'))]
-        target_Qphase = extract_dayside_bz_at_6re(
+        target_Qphase = extract_nightside_bz_at_6re(
             swmf_df=Quietphase,  
             target_radius_re=TARGET_RADIUS_RE,
             tol=R_TOL,
-            dayside_only=DAYSIDE_ONLY)
+            nightside_only=NIGHTSIDE_ONLY)
         target_Qphase["phase"] = "Quiet"
     ########################################
     # Quietphase=swmf_df.loc[prestorm_Stime:(SSC_Stime-pd.Timedelta('1ns'))]
@@ -474,27 +471,27 @@ for i in range(len(OMNI_flist)):
     #     tol=R_TOL,
     #     dayside_only=DAYSIDE_ONLY
     # )
-    # target_Qphase["phase"] = "Quiet"
-
-    target_SSC = extract_dayside_bz_at_6re(
+    # target_Qphase["phase"] = "Quiet"  
+    target_SSC = extract_nightside_bz_at_6re(
         swmf_df=SSCphase,  
         target_radius_re=TARGET_RADIUS_RE,
         tol=R_TOL,
-        dayside_only=DAYSIDE_ONLY
-    )   
+        nightside_only=NIGHTSIDE_ONLY
+    ) 
     target_SSC["phase"] = "SSC" 
-    target_Main = extract_dayside_bz_at_6re(
+    target_Main = extract_nightside_bz_at_6re(
         swmf_df=Mainphase,  
         target_radius_re=TARGET_RADIUS_RE,
         tol=R_TOL,
-        dayside_only=DAYSIDE_ONLY
+        nightside_only=NIGHTSIDE_ONLY
     )
     target_Main["phase"] = "Main"
-    target_Rec = extract_dayside_bz_at_6re(
+
+    target_Rec = extract_nightside_bz_at_6re(
         swmf_df=Recphase,  
         target_radius_re=TARGET_RADIUS_RE,
         tol=R_TOL,
-        dayside_only=DAYSIDE_ONLY
+        nightside_only=NIGHTSIDE_ONLY
     )
     target_Rec["phase"] = "Recovery"
     #################

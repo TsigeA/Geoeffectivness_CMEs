@@ -1,8 +1,8 @@
-# AR_swmf_dayside_bz.py
+# AR_swmf_Nightside_bz.py
 '''
 Aim: to predict the storm time magnetospheric dynamics using an AutoReg model
-with Exogenous inputs (ARX) for a single target variable: Bz_dayside_6RE.
- - This model predicts Bz_dayside_6RE at 1 hour and 2 hours ahead.
+with Exogenous inputs (ARX) for a single target variable: Bz_Nightside_6RE.
+ - This model predicts Bz_nightside_6RE at 1 hour and 2 hours ahead.
  - Implemented via statsmodels AutoReg with lags=p and exog.
  - The exogenous features are selected solar wind parameters.
  - The data is split storm-wise into training, validation, and test sets.
@@ -10,17 +10,8 @@ with Exogenous inputs (ARX) for a single target variable: Bz_dayside_6RE.
  - Rolling forecast applies the training-fitted parameters to each storm history window
    without re-running optimization (AutoReg.predict with params=fitted_model.params).
 @author: TsigeA
-@date: Jul 1, 2026
+@date: Jul 21, 2026
 @updates:
-   - Jul 13, 2026: lag order selection based on the RMSE of rolling forecast on validation storms.
-   - Jul 14, 2026: did stationary test on SWMF_Bz data and shows that the data is non-stationary but converting it to stationary, 
-   which is done by taking the difference between the data and its moving average. However, the data will lose the orginal pattern 
-   and the model will not be able to capture the orginal pattern of the data. Therefore, I decided to use the orginal data without converting it to stationary data.
-   - Jul 15, 2026: added k-fold storm-wise cross-validation to select the best AR order based on rolling forecast RMSE on validation storms.
-   - Jul 16, 2026: added diagnostic function to check the in-sample AIC/BIC/HQIC for different AR orders using ar_select_order. 
-   (This is one way of selecting the lag order and it is fast, but it is not the best way to select the lag order because it does not consider the out-of-sample performance of the model. 
-   Therefore, I will use the k-fold cross-validation method to select the best AR order based on rolling forecast RMSE on validation storms.)   
-
 '''
 import os
 from pathlib import Path
@@ -40,15 +31,15 @@ warnings.filterwarnings("ignore")
 # User settings
 # ----------------------------
 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-DATA_DIR = "Storm_csv_nolag"
+DATA_DIR = "Storm_csv_nolag_nightside"
 FILE_GLOB = "*.csv"
 
 DATETIME_COL = "datetime"
 
-TARGET_COL = "target_Bz_dayside_6RE_t0"
+TARGET_COL = "target_Bz_nightside_6RE_t0"
 
-TARGET_1H = "target_Bz_dayside_6RE_tplus_60m"
-TARGET_2H = "target_Bz_dayside_6RE_tplus_120m"
+TARGET_1H = "target_Bz_nightside_6RE_tplus_60m"
+TARGET_2H = "target_Bz_nightside_6RE_tplus_120m"
 
 FORECAST_STEPS = {
     "1h": 4,   # 4 x 15 min = 60 min
@@ -94,7 +85,7 @@ def get_exog_columns(df):
         TARGET_1H,
         TARGET_2H,
     }
-    use_cols = {"Bmag", "Pdyn","Es"}
+    use_cols = {"BY_used", "BZ_used"} #"Bmag", "BX", "BY_used", "BZ_used", "V", "Pdyn", "SYMH", "Ey", "Es", "theta", "Newell_Coupling"
 
     exog_cols = []
 
@@ -372,7 +363,7 @@ def select_ar_order_kfold(trainval_df, exog_cols, candidates, n_splits, seed):
 def main():
     df = load_all_storms(DATA_DIR)
     exog_cols = get_exog_columns(df)
-    output_dir = os.path.join("AR_results", f"AR_results_{current_time}")
+    output_dir = os.path.join("AR_results_Nightside", f"AR_results_{current_time}")
     os.makedirs(output_dir, exist_ok=True)
 
     print("Number of storms:", df["storm_id"].nunique())
@@ -470,7 +461,7 @@ def main():
         for storm_id, storm_score in storm_metrics.items():
             print(f"  {storm_id}: " + ", ".join(f"{k}={v:.4f}" for k, v in storm_score.items()))
 
-        outname = f"ar_dayside_6RE_Bz_predictions_{label}_{current_time}.csv"
+        outname = f"ar_nightside_6RE_Bz_predictions_{label}_{current_time}.csv"
         final_pred.to_csv(os.path.join(output_dir, outname), index=False)
         print("Saved:", os.path.join(output_dir, outname))
 
@@ -519,7 +510,7 @@ def main():
             ax.plot(storm_pred[DATETIME_COL], storm_pred["y_true"], label="True", color="black")
             ax.plot(storm_pred[DATETIME_COL], storm_pred["y_pred"], label="Predicted", color="blue")
             ax2.plot(storm_pred[DATETIME_COL], storm_pred["residual"], label="Residual", color="red", linewidth=0.5, alpha=0.8)
-            ax.set_title(f"Storm {storm_id} - {label} Bz_dayside_6RE Forecast")
+            ax.set_title(f"Storm {storm_id} - {label} Bz_Nightside_6RE Forecast")
             ax.set_xlabel("Time", fontsize=14)
             ax.set_ylabel(TARGET_COL, fontsize=14)
             ax2.set_ylabel("Residual", fontsize=14)

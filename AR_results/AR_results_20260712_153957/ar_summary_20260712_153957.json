@@ -41,7 +41,7 @@
         "MAE":13.7146104761,
         "R2":0.489132962
       },
-      "output_file":"AR_results_20260610_122628\/ar_dayside_6RE_Bz_predictions_1h_20260610_122628.csv"
+      "output_file":"AR_results\/AR_results_20260712_153957\/ar_dayside_6RE_Bz_predictions_1h_20260712_153957.csv"
     },
     "2h":{
       "metrics":{
@@ -49,7 +49,7 @@
         "MAE":18.9623491633,
         "R2":-0.0658321555
       },
-      "output_file":"AR_results_20260610_122628\/ar_dayside_6RE_Bz_predictions_2h_20260610_122628.csv"
+      "output_file":"AR_results\/AR_results_20260712_153957\/ar_dayside_6RE_Bz_predictions_2h_20260712_153957.csv"
     }
   },
   "model":"AutoReg(lags=2)"
